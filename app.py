@@ -37,6 +37,22 @@ if uploaded_file:
         df['ZScore'] = zscore(df['Value'].fillna(method='ffill'))
         df['Anomaly'] = abs(df['ZScore']) > 3
 
+        # IQR-based quadrant detection
+        Q1 = df['Value'].quantile(0.25)
+        Q3 = df['Value'].quantile(0.75)
+        IQR = Q3 - Q1
+        lower_bound = Q1 - 1.5 * IQR
+        upper_bound = Q3 + 1.5 * IQR
+
+        def label_quadrant(val):
+            if val < lower_bound:
+                return 'Lower'
+            elif val > upper_bound:
+                return 'Upper'
+            return ''
+
+        df['Quadrant'] = df['Value'].apply(label_quadrant)
+
         # Weekly grouping and time slotting
         df['Week'] = df['Timestamp'].dt.to_period('W').apply(lambda r: r.start_time)
         df['Weekday'] = df['Timestamp'].dt.weekday
@@ -60,6 +76,10 @@ if uploaded_file:
         ax.plot(df['Timestamp'], df['Value'], label='Actual')
         ax.plot(df['Timestamp'], df['Forecast'], label='Forecast', linestyle='--')
         ax.scatter(df.loc[df['Anomaly'], 'Timestamp'], df.loc[df['Anomaly'], 'Value'], color='red', label='Anomalies')
+        ax.scatter(df.loc[df['Quadrant'] == 'Upper', 'Timestamp'], df.loc[df['Quadrant'] == 'Upper', 'Value'], 
+                   color='orange', label='Upper Quadrant', marker='^')
+        ax.scatter(df.loc[df['Quadrant'] == 'Lower', 'Timestamp'], df.loc[df['Quadrant'] == 'Lower', 'Value'], 
+                   color='blue', label='Lower Quadrant', marker='v')
         ax.set_title(f"Energy Usage Forecast (RMSE: {rmse:.2f})")
         ax.set_xlabel("Timestamp")
         ax.set_ylabel("Value")
@@ -81,11 +101,11 @@ if uploaded_file:
         plt.legend()
         st.pyplot(fig2)
 
-        st.subheader("📥 Download Anomalies Report")
-        anomaly_df = df[df['Anomaly']][['Timestamp', 'Value', 'ZScore']]
-        st.dataframe(anomaly_df)
+        st.subheader("📥 Download Anomalies & Quadrants Report")
+        report_df = df[df['Anomaly'] | (df['Quadrant'] != '')][['Timestamp', 'Value', 'ZScore', 'Quadrant']]
+        st.dataframe(report_df)
 
         output = BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            anomaly_df.to_excel(writer, index=False, sheet_name='Anomalies')
-        st.download_button("Download Anomalies as Excel", data=output.getvalue(), file_name="anomalies_report.xlsx")
+            report_df.to_excel(writer, index=False, sheet_name='Anomalies_Quadrants')
+        st.download_button("Download Report as Excel", data=output.getvalue(), file_name="report_anomalies_quadrants.xlsx")
