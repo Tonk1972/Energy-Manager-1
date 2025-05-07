@@ -1,111 +1,64 @@
+
 import streamlit as st
 import pandas as pd
-import numpy as np
 import matplotlib.pyplot as plt
-from scipy.stats import zscore
-from io import BytesIO
+import numpy as np
 from sklearn.linear_model import LinearRegression
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
+from datetime import datetime
 
-st.set_page_config(page_title="Energy Management App", layout="wide")
-st.title("📊 Energy Management: Anomaly Detection, Benchmarking & Forecasting")
+st.title("🔋 Energy Management App")
 
-uploaded_file = st.file_uploader("Upload Excel File with 'Date', 'Time', and 'Value' columns", type=["xlsx", "xls", "csv"])
+uploaded_file = st.file_uploader("Upload your half-hourly data Excel file", type=["xlsx"])
 
 if uploaded_file:
-    if uploaded_file.name.endswith('.csv'):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file)
+    df = pd.read_excel(uploaded_file)
+    
+    # Ensure date and time are in correct format
+    df['Date'] = pd.to_datetime(df['Date'], format="%d/%m/%Y")
+    df['Timestamp'] = pd.to_datetime(df['Date'].astype(str) + ' ' + df['Time'].astype(str))
+    df = df[['Timestamp', 'Value']]
+    df = df.sort_values('Timestamp')
 
-    try:
-        df['Timestamp'] = pd.to_datetime(df['Date'] + ' ' + df['Time'], format='%d/%m/%Y %H:%M')
-    except Exception as e:
-        st.error(f"Date format error: {e}")
-    else:
-        df = df[['Timestamp', 'Value']]
-        df = df.sort_values('Timestamp')
-        df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
-        df.dropna(subset=['Value'], inplace=True)
+    # Add calendar info
+    df['Weekday'] = df['Timestamp'].dt.day_name()
+    df['IsWeekend'] = df['Timestamp'].dt.weekday >= 5
+    df['HalfHour'] = df['Timestamp'].dt.hour * 2 + df['Timestamp'].dt.minute // 30
+    df['Week'] = df['Timestamp'].dt.to_period("W").apply(lambda r: r.start_time)
 
-        # Weekend/Weekday categorization
-        df['DayOfWeek'] = df['Timestamp'].dt.day_name()
-        df['IsWeekend'] = df['DayOfWeek'].isin(['Saturday', 'Sunday'])
+    # Forecasting using linear regression
+    df['Ordinal'] = df['Timestamp'].map(datetime.toordinal)
+    X = df[['Ordinal']]
+    y = df['Value']
+    model = LinearRegression().fit(X, y)
+    df['Forecast'] = model.predict(X)
+    rmse = mean_squared_error(y, df['Forecast'], squared=False)
 
-        # Anomaly detection using z-score
-        df['ZScore'] = zscore(df['Value'].fillna(method='ffill'))
-        df['Anomaly'] = abs(df['ZScore']) > 3
+    # Anomaly detection using IQR
+    Q1 = df['Value'].quantile(0.25)
+    Q3 = df['Value'].quantile(0.75)
+    IQR = Q3 - Q1
+    lower_bound = Q1 - 1.5 * IQR
+    upper_bound = Q3 + 1.5 * IQR
+    df['Anomaly'] = (df['Value'] < lower_bound) | (df['Value'] > upper_bound)
 
-        # IQR-based quadrant detection
-        Q1 = df['Value'].quantile(0.25)
-        Q3 = df['Value'].quantile(0.75)
-        IQR = Q3 - Q1
-        lower_bound = Q1 - 1.5 * IQR
-        upper_bound = Q3 + 1.5 * IQR
+    # Identify quadrant position
+    df['Quadrant'] = pd.cut(df['Value'], bins=[-np.inf, Q1, Q3, np.inf], labels=['Lower', 'Middle', 'Upper'])
 
-        def label_quadrant(val):
-            if val < lower_bound:
-                return 'Lower'
-            elif val > upper_bound:
-                return 'Upper'
-            return ''
-
-        df['Quadrant'] = df['Value'].apply(label_quadrant)
-
-        # Weekly grouping and time slotting
-        df['Week'] = df['Timestamp'].dt.to_period('W').apply(lambda r: r.start_time)
-        df['Weekday'] = df['Timestamp'].dt.weekday
-        df['HalfHour'] = df['Timestamp'].dt.hour * 2 + df['Timestamp'].dt.minute // 30
-
-        # Forecasting with linear regression
-        df['OrdinalTime'] = df['Timestamp'].map(pd.Timestamp.toordinal)
-        X = df[['OrdinalTime']]
-        y = df['Value']
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
-        model = LinearRegression().fit(X_train, y_train)
-        df['Forecast'] = model.predict(X)
-
-        # RMSE
-        y_pred = model.predict(X_test)
-        rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-
-        # Plotting
-        st.subheader("📈 Energy Usage, Forecast & Anomalies")
-        fig, ax = plt.subplots(figsize=(12, 5))
-        ax.plot(df['Timestamp'], df['Value'], label='Actual')
-        ax.plot(df['Timestamp'], df['Forecast'], label='Forecast', linestyle='--')
-        ax.scatter(df.loc[df['Anomaly'], 'Timestamp'], df.loc[df['Anomaly'], 'Value'], color='red', label='Anomalies')
-        ax.scatter(df.loc[df['Quadrant'] == 'Upper', 'Timestamp'], df.loc[df['Quadrant'] == 'Upper', 'Value'], 
-                   color='orange', label='Upper Quadrant', marker='^')
-        ax.scatter(df.loc[df['Quadrant'] == 'Lower', 'Timestamp'], df.loc[df['Quadrant'] == 'Lower', 'Value'], 
-                   color='blue', label='Lower Quadrant', marker='v')
-        ax.set_title(f"Energy Usage Forecast (RMSE: {rmse:.2f})")
-        ax.set_xlabel("Timestamp")
-        ax.set_ylabel("Value")
-        ax.legend()
-        st.pyplot(fig)
-
-        st.subheader("📊 Weekday vs Weekend Comparison")
-        weekday_avg = df.groupby('IsWeekend')['Value'].mean()
-        st.bar_chart(weekday_avg.rename({False: "Weekday", True: "Weekend"}))
-
-        st.subheader("📆 Weekly Half-Hourly Trends")
-        pivot = df.pivot_table(index=['Weekday', 'HalfHour'], columns='Week', values='Value')
-        fig2 = plt.figure(figsize=(12, 5))
-        for week in pivot.columns:
-            plt.plot(pivot.index, pivot[week], label=str(week.date()))
-        plt.title("Weekly Half-Hourly Comparison")
-        plt.xlabel("Time of Week (Weekday + HalfHour Slot)")
-        plt.ylabel("Value")
-        plt.legend()
-        st.pyplot(fig2)
-
-        st.subheader("📥 Download Anomalies & Quadrants Report")
-        report_df = df[df['Anomaly'] | (df['Quadrant'] != '')][['Timestamp', 'Value', 'ZScore', 'Quadrant']]
-        st.dataframe(report_df)
-
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            report_df.to_excel(writer, index=False, sheet_name='Anomalies_Quadrants')
-        st.download_button("Download Report as Excel", data=output.getvalue(), file_name="report_anomalies_quadrants.xlsx")
+    # Plot energy usage with forecast and anomalies
+    st.subheader("📈 Energy Usage, Forecast & Anomalies")
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.plot(df['Timestamp'], df['Value'], label='Actual')
+    ax.plot(df['Timestamp'], df['Forecast'], label='Forecast', linestyle='--')
+    ax.scatter(df.loc[df['Anomaly'], 'Timestamp'], df.loc[df['Anomaly'], 'Value'], color='red', label='Anomalies')
+    ax.scatter(df.loc[df['Quadrant'] == 'Upper', 'Timestamp'], df.loc[df['Quadrant'] == 'Upper', 'Value'], 
+               color='orange', label='Upper Quadrant', marker='^')
+    ax.scatter(df.loc[df['Quadrant'] == 'Lower', 'Timestamp'], df.loc[df['Quadrant'] == 'Lower', 'Value'], 
+               color='blue', label='Lower Quadrant', marker='v')
+    ax.axhline(y=lower_bound, color='blue', linestyle=':', linewidth=1, label='Lower Threshold')
+    ax.axhline(y=upper_bound, color='orange', linestyle=':', linewidth=1, label='Upper Threshold')
+    ax.set_title(f"Energy Usage Forecast (RMSE: {rmse:.2f})")
+    ax.set_xlabel("Timestamp")
+    ax.set_ylabel("Value")
+    ax.legend()
+    st.pyplot(fig)
