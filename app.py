@@ -12,7 +12,11 @@ st.title("🔋 Energy Management App")
 uploaded_file = st.file_uploader("Upload your half-hourly data Excel file", type=["xlsx"])
 
 if uploaded_file:
-    df = pd.read_excel(uploaded_file)
+    try:
+        df = pd.read_excel(uploaded_file, sheet_name=0)
+    except Exception as e:
+        st.error(f"❌ Failed to read Excel file: {e}")
+        st.stop()
     
     # Ensure date and time are in correct format
     df['Date'] = pd.to_datetime(df['Date'], format="%d/%m/%Y")
